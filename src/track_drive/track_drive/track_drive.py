@@ -27,8 +27,11 @@ class TrackDriverNode(Node):
         self.get_logger().info('----- Xycar self-driving node started -----')
         
         # 상수값 및 초기값 설정
+        self.first = True
         self.image = None  # 카메라 토픽 데이터를 저장할 변수
         self.lidar_ranges = None
+        self.lidar_no_scan_cnt = 0
+        self.go_straight_start_time = None
         
         self.latest_cv_image = None
         self.bridge = CvBridge()
@@ -61,28 +64,44 @@ class TrackDriverNode(Node):
         self.get_logger().info("🏎️ 마스터 주행 통합 노드가 가동되었습니다. (Multi Thread 구조)")
     
     def traffic_status_callback(self, msg):
+        if self.go_straight_start_time == None:
+            if msg.data == "GO" and self.traffic_status != "GO":
+                self.go_straight_start_time = time.time() # 현재 시간 기록
+            
         self.traffic_status = msg.data
+        if self.traffic_status == "GO":
+            self.first = False
         
     def image_callback(self, msg):
-        if self.drive_status == "lidar":
+        if self.drive_status == "RABACON":
             return
+        if self.first and self.traffic_status != "GO":
+            return
+        
+        if self.traffic_status != "NONE": 
+            if self.traffic_status == "STOP":
+                self.base_speed = 0.0
+                self.publish_motor(0.0, 0.0)
+                return
+            elif self.traffic_status == "YELLOW":
+                if self.base_speed != 0:
+                    self.base_speed = 0.2
+                # print("YELLOW")
+            elif self.traffic_status == "GO":
+                self.base_speed = 12.0
+                # print("GO")
+        
+        if self.traffic_status == "GO" and self.go_straight_start_time is not None:
+            if time.time() - self.go_straight_start_time < 1.5:
+                print("🚦 [교차로 통과 중] 차선 인식을 우회하고 강제 직진합니다.")
+                self.publish_motor(speed=10.0, angle=0.0) 
+                return 
         self.latest_cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         
         if self.latest_cv_image is None:
             return
         
         frame = self.latest_cv_image
-
-        if self.traffic_status != "NONE":  # 신호등이 감지된 상황이라면 (detected == True 효과)
-            if self.traffic_status == "STOP":
-                self.base_speed = 0.0
-                return
-            elif self.traffic_status == "YELLOW":
-                self.base_speed = 0.2
-                # print("YELLOW")
-            elif self.traffic_status == "GO":
-                self.base_speed = 12.0
-                # print("GO")
 
         self.child_zone_module.image_callback(frame)
         if self.child_zone_module.current_drive_mode == "NORMAL":
@@ -99,8 +118,9 @@ class TrackDriverNode(Node):
         # 디버깅용
         # self.get_logger().info(f"light detect : {self.traffic_light_module.traffic_light_detected}")
         # self.get_logger().info(f"status is {self.traffic_light_module.signal_status}")
-        
+        print(f'speed {self.base_speed}')
         self.publish_motor(speed=self.base_speed, angle=self.base_angle)
+        
         # self.publish_motor(speed=local_speed, angle=local_angle)
         
         
@@ -149,8 +169,6 @@ class TrackDriverNode(Node):
         return float(np.mean(values))
 
     def scan_callback(self, scan):
-        print("Im in LIDAR")
-        self.drive_status = "lidar"
         left_values = self.get_range_values(scan, 20, 80)
         right_values = self.get_range_values(scan, -80, -20)
         front_values = self.get_range_values(scan, -15, 15)
@@ -159,29 +177,57 @@ class TrackDriverNode(Node):
         right_dist = self.mean_or_none(right_values)
         front_dist = self.mean_or_none(front_values)
 
-        angle = 0.0
-        speed = self.base_speed
+        print('_____________________')
+        print(left_dist, left_values)
+        print(right_dist, right_values)
+        print(front_dist, front_values)
+        print('_____________________')
 
-        if left_dist is not None and right_dist is not None:
-            error = left_dist - right_dist
-            angle = self.kp * error -30.0
+        if (left_dist is not None and left_dist > 1.2 and len(left_values) >= 2) and \
+           (right_dist is not None and right_dist > 1.2 and len(right_values) >= 2):
+            self.drive_status = "RABACON"
+        # print(left_dist, left_values)
+        # print('_____________________')
+        # print(right_dist, right_values)
+        
+        if self.drive_status == "RABACON":
+            if len(left_values) == 0 and len(right_values) == 0:
+                self.lidar_no_scan_cnt += 1
 
-        elif left_dist is not None:
-            angle = 55.0
+                if self.lidar_no_scan_cnt > 5:
+                    self.lidar_no_scan_cnt = 0
+                    self.drive_status = "NORMAL"
+                    print("status : Rabacon -> Normal")
+                return 
+            else:
+                self.lidar_no_scan_cnt = 0
+        
+        if self.drive_status == "RABACON":    
+            print("In RABACON")
+            angle = 0.0
+            speed = 10.0
 
-        elif right_dist is not None:
-            angle = -85.0
+            if left_dist is not None and right_dist is not None:
+                error = left_dist - right_dist
+                angle = self.kp * error -30.0
 
-        else:
-            angle = -20.0
-            speed = 8.0
+            elif left_dist is not None:
+                angle = 55.0
 
-        if front_dist is not None and front_dist < 0.6:
-            speed = 8.0
+            elif right_dist is not None:
+                angle = -85.0
 
-        angle = max(min(angle, self.max_angle), -self.max_angle)
+            else:
+                angle = -20.0
+                speed = 8.0
 
-        self.publish_motor(speed, angle)
+            if front_dist is not None and front_dist < 0.6:
+                speed = 8.0
+
+            angle = max(min(angle, self.max_angle), -self.max_angle)
+
+            self.publish_motor(speed, angle)
+        
             
 
 def run_traffic_light():
@@ -206,7 +252,6 @@ def run_driver():
     except KeyboardInterrupt:
         pass
     finally:
-        node.publish_motor(speed=0.0, angle=0.0)
         node.destroy_node()
         rclpy.shutdown()
         
