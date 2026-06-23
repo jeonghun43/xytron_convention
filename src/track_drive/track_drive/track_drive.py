@@ -13,6 +13,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from std_msgs.msg import String
 from .with_yolo_traffic_light import with_yolo_traffic_light
 from .child_zone import SchoolZoneDetector
+from .child_zone_v2 import ChildZoneDetector
 from .line import LineTraceNode
 from .rabacon import RabaconDrive
 
@@ -47,7 +48,7 @@ class TrackDriverNode(Node):
         self.base_angle = 0.0
         
         self.line_module = LineTraceNode(standalone=False)
-        self.child_zone_module = SchoolZoneDetector(standalone=False)
+        self.child_zone_module = ChildZoneDetector(standalone=False)
         # self.rabar_module = RabaconDrive()
         
         self.main_callback_group = ReentrantCallbackGroup()
@@ -59,7 +60,6 @@ class TrackDriverNode(Node):
         self.lidar_sub = self.create_subscription(LaserScan, "/scan", self.scan_callback, qos_profile_sensor_data, callback_group=self.main_callback_group)
         self.traffic_sub = self.create_subscription(String, '/traffic_light_status', self.traffic_status_callback, 10)
         self.motor_pub = self.create_publisher(XycarMotor, '/xycar_motor', 10)
-
         
         self.get_logger().info("🏎️ 마스터 주행 통합 노드가 가동되었습니다. (Multi Thread 구조)")
     
@@ -75,10 +75,12 @@ class TrackDriverNode(Node):
     def image_callback(self, msg):
         if self.drive_status == "RABACON":
             return
+        
         if self.first and self.traffic_status != "GO":
             return
         
         if self.traffic_status != "NONE": 
+            # print("here?")
             if self.traffic_status == "STOP":
                 self.base_speed = 0.0
                 self.publish_motor(0.0, 0.0)
@@ -104,22 +106,22 @@ class TrackDriverNode(Node):
         frame = self.latest_cv_image
 
         self.child_zone_module.image_callback(frame)
-        if self.child_zone_module.current_drive_mode == "NORMAL":
+        if self.child_zone_module.zone_status == "NORMAL":
             # print("normal so speed and angle by line module")
             self.line_module.image_callback(frame)
             self.base_speed = self.line_module.base_speed
             # print(f"speed : {self.base_speed}")
             self.base_angle = self.line_module.angle_deg
         else:
-            self.base_speed = self.child_zone_module.school_zone_speed
+            # self.base_speed = 5
             print('child zone')
             # print('this is school zone angle: ', self.base_angle)
             
         # 디버깅용
         # self.get_logger().info(f"light detect : {self.traffic_light_module.traffic_light_detected}")
         # self.get_logger().info(f"status is {self.traffic_light_module.signal_status}")
-        print(f'speed {self.base_speed}')
-        self.publish_motor(speed=self.base_speed, angle=self.base_angle)
+        # print(f'speed {self.base_speed}')
+        # self.publish_motor(speed=self.base_speed, angle=self.base_angle)
         
         # self.publish_motor(speed=local_speed, angle=local_angle)
         
@@ -177,14 +179,15 @@ class TrackDriverNode(Node):
         right_dist = self.mean_or_none(right_values)
         front_dist = self.mean_or_none(front_values)
 
-        print('_____________________')
-        print(left_dist, left_values)
-        print(right_dist, right_values)
-        print(front_dist, front_values)
-        print('_____________________')
+        # print('_____________________')
+        # print(left_dist, left_values)
+        # print(right_dist, right_values)
+        # print(front_dist, front_values)
+        # print('_____________________')
 
         if (left_dist is not None and left_dist > 1.2 and len(left_values) >= 2) and \
-           (right_dist is not None and right_dist > 1.2 and len(right_values) >= 2):
+           (right_dist is not None and right_dist > 1.2 and len(right_values) >= 2) and \
+            front_dist is None:
             self.drive_status = "RABACON"
         # print(left_dist, left_values)
         # print('_____________________')
@@ -194,7 +197,7 @@ class TrackDriverNode(Node):
             if len(left_values) == 0 and len(right_values) == 0:
                 self.lidar_no_scan_cnt += 1
 
-                if self.lidar_no_scan_cnt > 5:
+                if self.lidar_no_scan_cnt > 3:
                     self.lidar_no_scan_cnt = 0
                     self.drive_status = "NORMAL"
                     print("status : Rabacon -> Normal")
@@ -203,7 +206,7 @@ class TrackDriverNode(Node):
                 self.lidar_no_scan_cnt = 0
         
         if self.drive_status == "RABACON":    
-            print("In RABACON")
+            # print("In RABACON")
             angle = 0.0
             speed = 10.0
 
@@ -281,116 +284,4 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-
-
-# #!/usr/bin/env python3
-# # -*- coding: utf-8 -*- 1
-# #=============================================
-# # 본 프로그램은 자이트론에서 제작한 것입니다.
-# # 상업라이센스에 의해 제공되므로 무단배포 및 상업적 이용을 금합니다.
-# # 교육과 실습 용도로만 사용가능하며 외부유출은 금지됩니다.
-# #=============================================
-# import rclpy, time, cv2, os, math
-# import numpy as np
-# from rclpy.node import Node
-# from xycar_msgs.msg import XycarMotor
-# from sensor_msgs.msg import Image
-# from sensor_msgs.msg import LaserScan
-# from rclpy.qos import qos_profile_sensor_data
-# from rclpy.duration import Duration
-# from cv_bridge import CvBridge
-
-# #=============================================
-# # ROS2 Node 클래스 정의
-# #=============================================
-# class TrackDriverNode(Node):
-
-#     #=============================================
-#     # 클래스 생성 초기화 함수
-#     #=============================================
-#     def __init__(self):
-
-#         super().__init__('driver')
-#         self.get_logger().info('----- Xycar self-driving node started -----')
-        
-#         # 상수값 및 초기값 설정
-#         self.image = None  # 카메라 토픽 데이터를 저장할 변수
-#         self.motor_msg = XycarMotor()  # 모터토픽 메시지        
-#         self.lidar_ranges = None
-#         self.bridge = CvBridge()
-    
-#         # ROS2 Publisher & Subscriber 설정
-#         self.motor_pub = self.create_publisher(XycarMotor,'xycar_motor',10)
-        
-#         self.sub_front = self.create_subscription(
-#             Image, '/usb_cam/image_raw/front', self.cam_callback, qos_profile_sensor_data)
-
-#         self.subscription = self.create_subscription(
-#             LaserScan, '/scan', self.lidar_callback, qos_profile_sensor_data)
-		
-#         self.get_logger().info("Track Driver Node Initialized")
-              
-#     #=============================================
-#     # 카메라 토픽을 수신하는 콜백 함수
-#     #=============================================
-#     def cam_callback(self, data):
-#         # 수신한 메시지를 OpenCV 이미지로 변환하여 저장
-#         self.image = self.bridge.imgmsg_to_cv2(data, "bgr8")
-    
-#     #=============================================
-#     # 라이다 토픽을 수신하는 콜백 함수
-#     #=============================================
-#     def lidar_callback(self, msg):
-#         self.lidar_ranges = msg.ranges   
-      
-#     #=============================================
-#     # 모터제어 토픽을 발행하는 Publisher 함수
-#     #=============================================
-#     def drive(self, angle, speed):
-#         self.motor_msg.angle = float(angle)
-#         self.motor_msg.speed = float(speed)
-#         self.motor_pub.publish(self.motor_msg)
-
-#     #=============================================
-#     # 메인 루프
-#     #=============================================
-#     def main_loop(self):
-    
-#         self.get_logger().info("======================================")
-#         self.get_logger().info("  S T A R T    D R I V I N G ...      ")
-#         self.get_logger().info("======================================")
-
-#         while rclpy.ok():
-        
-#             for _ in range(15):
-#                 self.drive(angle=0,speed=0)
-#                 time.sleep(0.1)
-
-#             for _ in range(15):
-#                 self.drive(angle=0,speed=5)
-#                 time.sleep(0.1)
-                
-# #=============================================
-# # 메인 함수
-# #=============================================
-# def main(args=None):
-      
-#     rclpy.init(args=args)
-#     node = TrackDriverNode()
-	
-#     try:
-#         # main_loop() 함수를 호출하여 실행합니다.
-#         node.main_loop()
-#     except KeyboardInterrupt:
-#         # 사용자 인터럽트 (Ctrl+C)가 발생하면 예외를 처리합니다.
-#         pass
-#     finally:
-#         # 노드를 종료하고 ROS2를 정리합니다.
-#         node.drive(angle=0, speed=0)
-#         cv2.destroyAllWindows()
-#         node.destroy_node()
-#         rclpy.shutdown()
-
-# if __name__ == '__main__':
-#     main()
 
