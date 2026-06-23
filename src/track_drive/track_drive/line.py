@@ -12,20 +12,20 @@ class LineTraceNode(Node):
     def __init__(self, standalone=True):
         super().__init__('line')
         # self.is_printed = False ##디버깅용
-        self.image_sub = self.create_subscription(Image, '/usb_cam/image_raw/front', self.image_callback, 10)
+        # self.image_sub = self.create_subscription(Image, '/usb_cam/image_raw/front', self.image_callback, 10)
         self.motor_pub = self.create_publisher(XycarMotor, "/xycar_motor", 10)
         self.standalone = standalone
         self.bridge = CvBridge()
         # self.get_logger().info(" 🛣️ Line trace node has started.")
         self.main_line = None
-        self.base_speed = 13
+        self.base_speed = 12
         self.angle_deg = 0.0
         self.cant_find_line = 0
         
         self.last_lane_visible_time = time.time()
         
     def image_callback(self, data):
-        # print("line?")
+        print("line?")
         if self.standalone:
             try:
                 frame = self.bridge.imgmsg_to_cv2(data, "bgr8")
@@ -48,9 +48,11 @@ class LineTraceNode(Node):
         mask = cv2.inRange(hsv, lower_white, upper_white)
         kernel = np.ones((5, 5), np.uint8)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-        # cv2.imshow("mask Image", mask)
         lines = cv2.HoughLinesP(mask, 1, np.pi / 180, threshold=50, minLineLength=30, maxLineGap=40)
         
+        # debug_mask = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+        # cv2.imshow("mask Image", debug_mask)
+        # cv2.waitKey(1)
         # 한번만 실행
         # if lines is not None and not self.is_printed:
         #     print(sorted_lines.shape)
@@ -139,7 +141,7 @@ class LineTraceNode(Node):
                 self.angle_deg = 100
             elif self.angle_deg < 0:
                 self.angle_deg = -100
-            self.cant_find_line = 10
+            self.cant_find_line = 20
             self.publish_motor(self.base_speed, self.angle_deg)
             return
 
@@ -154,7 +156,7 @@ class LineTraceNode(Node):
             self.angle_deg = np.clip(diff_x, -100, 100)
             
             if self.cant_find_line == 0:
-                self.base_speed = 13
+                self.base_speed = 12
             elif self.cant_find_line > 0:
                 self.cant_find_line -= 1
             # 자체 모터

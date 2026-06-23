@@ -10,9 +10,9 @@ import cv2
 import numpy as np
 
 
-class with_yolo_traffic_light:
+class with_yolo_traffic_light(Node):
     def __init__(self, standalone=True):
-        # super().__init__('yolo_detector')
+        super().__init__('yolo_detector')
         self.model = YOLO('yolov8n.pt')
         self.bridge = CvBridge()
         if standalone:
@@ -25,7 +25,7 @@ class with_yolo_traffic_light:
         # self.get_logger().info("✅ YOLOv8 ROS2 Detector Started")
         
         self.traffic_light_detected = False
-        self.signal_status = False
+        self.signal_status = None
         
     def image_callback(self, msg):
         if self.standalone:
@@ -118,13 +118,9 @@ class with_yolo_traffic_light:
                     msg_out.data = "NONE"
                 else:
                     msg_out.data = self.signal_status # "STOP", "GO", "YELLOW" 중 하나
-                
-                if self.standalone:
-                    pass
-                else:
-                    # 3. 마스터 노드를 향해 무전 쏘기!
-                    self.status_pub.publish(msg_out)
-                    print(f'traffic status : {msg_out.data}')
+                print(msg_out.data)
+                self.status_pub.publish(msg_out)
+                # print(f'traffic status : {msg_out.data}')
                 # if aspect_ratio >= 3:
                 #     cv2.imshow( "red", roi[:, :crop_ratio])
                 #     cv2.imshow( "yellow", roi[:, crop_ratio:2*crop_ratio])
