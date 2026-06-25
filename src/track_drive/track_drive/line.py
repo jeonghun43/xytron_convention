@@ -12,7 +12,8 @@ class LineTraceNode(Node):
     def __init__(self, standalone=True):
         super().__init__('line')
         # self.is_printed = False ##디버깅용
-        # self.image_sub = self.create_subscription(Image, '/usb_cam/image_raw/front', self.image_callback, 10)
+        if standalone:
+            self.image_sub = self.create_subscription(Image, '/usb_cam/image_raw/front', self.image_callback, 10) #개별 실행용
         self.motor_pub = self.create_publisher(XycarMotor, "/xycar_motor", 10)
         self.standalone = standalone
         self.bridge = CvBridge()
@@ -22,10 +23,12 @@ class LineTraceNode(Node):
         self.angle_deg = 0.0
         self.cant_find_line = 0
         
+        self.standard_d = 520
+        
         self.last_lane_visible_time = time.time()
         
     def image_callback(self, data):
-        print("line?")
+        # print("line?")
         if self.standalone:
             try:
                 frame = self.bridge.imgmsg_to_cv2(data, "bgr8")
@@ -141,14 +144,20 @@ class LineTraceNode(Node):
                 self.angle_deg = 100
             elif self.angle_deg < 0:
                 self.angle_deg = -100
-            self.cant_find_line = 20
+            self.cant_find_line = 30
             self.publish_motor(self.base_speed, self.angle_deg)
             return
 
         try:
             coefficient = np.polyfit(y, x, 1)
             calculate_x = np.poly1d(coefficient)
-            diff_x = calculate_x(200) - 520
+            
+            #원본
+            diff_x = calculate_x(200) - self.standard_d
+            
+            #우측 정렬 실험
+            # diff_x = calculate_x(200) - 500
+            # print(calculate_x(200))
             
             # if(diff_x > 20 or diff_x < -20):
             #     diff_x = 0
@@ -192,11 +201,11 @@ class LineTraceNode(Node):
            
         
 def main(args=None):
-     rclpy.init(args=args)
-     line = LineTraceNode()
-     rclpy.spin(line)
-     line.destroy_node()
-     rclpy.shutdown()
+    rclpy.init(args=args)
+    line = LineTraceNode()
+    rclpy.spin(line)
+    line.destroy_node()
+    rclpy.shutdown()
      
 if __name__ == '__main__':
     main()

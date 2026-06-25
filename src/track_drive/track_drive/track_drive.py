@@ -11,8 +11,8 @@ from sensor_msgs.msg import LaserScan
 from cv_bridge import CvBridge
 from rclpy.callback_groups import ReentrantCallbackGroup
 from std_msgs.msg import String
+# from nav_msgs.msg import Odometry
 from .with_yolo_traffic_light import with_yolo_traffic_light
-from .child_zone import SchoolZoneDetector
 from .child_zone_v2 import ChildZoneDetector
 from .line import LineTraceNode
 from .rabacon import RabaconDrive
@@ -56,9 +56,16 @@ class TrackDriverNode(Node):
         self.traffic_status = "NONE" 
         self.drive_status = "NONE"
         
+        self.odom_cnt = 0
+        self.prev_x = None
+        self.prev_y = None
+        self.total_distance = 0.0  # 총 이동 거리
+        self.is_passing_zone = False # 추월 로직 ON/OFF 플래그
+        
         self.image_sub = self.create_subscription(Image, '/usb_cam/image_raw/front', self.image_callback, 10, callback_group=self.main_callback_group)
         self.lidar_sub = self.create_subscription(LaserScan, "/scan", self.scan_callback, qos_profile_sensor_data, callback_group=self.main_callback_group)
         self.traffic_sub = self.create_subscription(String, '/traffic_light_status', self.traffic_status_callback, 10)
+        # self.odom_sub = self.create_subscription(Odometry, '/odom', self.odom_callback, 10) # QoS 프로파일 (일반적으로 10 사용)
         self.motor_pub = self.create_publisher(XycarMotor, '/xycar_motor', 10)
         
         self.get_logger().info("🏎️ 마스터 주행 통합 노드가 가동되었습니다. (Multi Thread 구조)")
@@ -95,7 +102,7 @@ class TrackDriverNode(Node):
         
         if self.traffic_status == "GO" and self.go_straight_start_time is not None:
             if time.time() - self.go_straight_start_time < 1.5:
-                print("🚦 [교차로 통과 중] 차선 인식을 우회하고 강제 직진합니다.")
+                # print("🚦 [교차로 통과 중] 차선 인식을 우회하고 강제 직진합니다.")
                 self.publish_motor(speed=10.0, angle=0.0) 
                 return 
         self.latest_cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
@@ -113,8 +120,9 @@ class TrackDriverNode(Node):
             # print(f"speed : {self.base_speed}")
             self.base_angle = self.line_module.angle_deg
         else:
+            pass
             # self.base_speed = 5
-            print('child zone')
+            # print('child zone')
             # print('this is school zone angle: ', self.base_angle)
             
         # 디버깅용
@@ -184,7 +192,8 @@ class TrackDriverNode(Node):
         # print(right_dist, right_values)
         # print(front_dist, front_values)
         # print('_____________________')
-
+     
+        
         if (left_dist is not None and left_dist > 1.2 and len(left_values) >= 2) and \
            (right_dist is not None and right_dist > 1.2 and len(right_values) >= 2) and \
             front_dist is None:
@@ -200,7 +209,7 @@ class TrackDriverNode(Node):
                 if self.lidar_no_scan_cnt > 3:
                     self.lidar_no_scan_cnt = 0
                     self.drive_status = "NORMAL"
-                    print("status : Rabacon -> Normal")
+                    # print("status : Rabacon -> Normal")
                 return 
             else:
                 self.lidar_no_scan_cnt = 0
@@ -230,7 +239,108 @@ class TrackDriverNode(Node):
             angle = max(min(angle, self.max_angle), -self.max_angle)
 
             self.publish_motor(speed, angle)
+            
+        ranges = scan.ranges
         
+        # 1. 시야 구역 세분화 (노이즈 구간 99~262 완벽 배제)
+        # ① 정면 중앙 (-15도 ~ +15도)
+        f_center = [d for d in list(ranges[345:360]) + list(ranges[0:15]) if math.isfinite(d)]
+        # ② 좌측 앞 (15도 ~ 45도) : 왼쪽 차선이 비었는지 확인
+        f_left = [d for d in ranges[15:45] if math.isfinite(d)]
+        # ③ 우측 앞 (315도 ~ 345도) : 오른쪽 차선이 비었는지 확인
+        f_right = [d for d in ranges[315:345] if math.isfinite(d)]
+        
+        # ④ 좌측 측면 (45도 ~ 90도) : 우측 추월 시 상대차가 왼쪽에 있는지 확인
+        s_left = [d for d in ranges[45:90] if math.isfinite(d)]
+        # ⑤ 우측 측면 (270도 ~ 315도) : 좌측 추월 시 상대차가 오른쪽에 있는지 확인
+        s_right = [d for d in ranges[270:315] if math.isfinite(d)]
+
+        # 각 구역별 최소 거리 계산 (데이터가 없으면 무한대로 처리)
+        min_f_center = min(f_center) if f_center else float('inf')
+        min_f_left = min(f_left) if f_left else float('inf')
+        min_f_right = min(f_right) if f_right else float('inf')
+        min_s_left = min(s_left) if s_left else float('inf')
+        min_s_right = min(s_right) if s_right else float('inf')
+        
+        # 2. 상태 머신 (양방향 FSM)
+        if self.drive_status == 'NORMAL':
+            if min_f_center < 5 and len(f_center) > 10:  # 정면에 차량 감지
+                # 뚫린 차선 판단 (좌/우측 앞 공간 비교)
+                if min_f_left > min_f_right:
+                    self.pass_direction = 'LEFT'
+                    # self.get_logger().warn(f"정면 막힘! 좌측 공간 확인됨({min_f_left:.1f}m). 좌측 회피 시작!")
+                else:
+                    self.pass_direction = 'RIGHT'
+                    # self.get_logger().warn(f"정면 막힘! 우측 공간 확인됨({min_f_right:.1f}m). 우측 회피 시작!")
+                
+                self.drive_status = 'AVOID'
+
+        elif self.drive_status == 'AVOID':
+            if self.pass_direction == 'LEFT':
+                # self.get_logger().info("좌측으로 차선 변경 중...")
+                self.line_module.standard_d = 600
+            else:
+                # self.get_logger().info("우측으로 차선 변경 중...")
+                self.line_module.standard_d = 440
+
+            # 차선을 완전히 넘어와서 정면이 뚫렸다면 직진(추월) 상태로 전환
+            if min_f_center > 10:
+                # self.get_logger().warn("차선 진입 완료, 직진하며 추월합니다.")
+                self.drive_status = 'PASSING'
+                
+
+        elif self.drive_status == 'PASSING':
+            # self.get_logger().info("추월 차선에서 직진 중...")
+            # [TODO] 스티어링 중립 (직진 0.0)
+            self.base_speed = 15
+            # 내가 좌측으로 피했다면, 상대차는 내 '우측'에 있음
+            if self.pass_direction == 'LEFT' and min_s_right > 5.0:
+                # self.get_logger().warn("우측 상대 차량 통과 완료! 차선 복귀 시작")
+                self.drive_status = 'RETURN'
+            # 내가 우측으로 피했다면, 상대차는 내 '좌측'에 있음
+            elif self.pass_direction == 'RIGHT' and min_s_left > 5.0:
+                # self.get_logger().warn("좌측 상대 차량 통과 완료! 차선 복귀 시작")
+                self.drive_status = 'RETURN'
+
+        elif self.drive_status == 'RETURN':
+            # 피했던 방향의 반대 방향으로 조향하여 복귀
+            if self.pass_direction == 'LEFT':
+                # self.get_logger().info("우측으로 조향하여 본래 차선 복귀 중...")
+                # [TODO] 우측으로 스티어링 꺾기 (예: -0.3)
+                self.line_module.standard_d = 500
+            else:
+                # self.get_logger().info("좌측으로 조향하여 본래 차선 복귀 중...")
+                # [TODO] 좌측으로 스티어링 꺾기 (예: +0.3)
+                self.line_module.standard_d = 540
+            
+            # 복귀 완료 조건 (정면이 충분히 뚫렸고, 다시 중앙에 자리 잡았다고 가정)
+            if min_f_center > 5.0: 
+                #  self.get_logger().warn("차선 복귀 완료! 일반 주행 전환")
+                 self.drive_status = 'NORMAL'
+                 self.pass_direction = None # 방향 초기화
+    
+    # def odom_callback(self, msg):
+    #     curr_x = msg.pose.pose.position.x
+    #     curr_y = msg.pose.pose.position.y
+
+    #     # 처음 데이터가 들어왔을 때 초기화
+    #     if self.prev_x is None or self.prev_y is None:
+    #         self.prev_x = curr_x
+    #         self.prev_y = curr_y
+    #         return
+
+    #     # 직전 위치와 현재 위치 사이의 이동 거리(피타고라스 정리) 계산하여 누적
+    #     dx = curr_x - self.prev_x
+    #     dy = curr_y - self.prev_y
+    #     self.total_distance += math.sqrt(dx**2 + dy**2)
+
+    #     # 직전 위치 업데이트
+    #     self.prev_x = curr_x
+    #     self.prev_y = curr_y
+
+    #     self.odom_cnt += 1
+    #     # [측정용 로그] 차를 수동으로 움직여보면서 추월 구간의 시작점과 끝점 거리를 메모하세요!
+    #     print(f"현재 누적 이동 거리: {self.total_distance:.2f} m")
             
 
 def run_traffic_light():
