@@ -59,15 +59,15 @@ class ChildZoneDetector(Node):
         if yello_count > 6000 and self.duplicate_count == 0:
             if self.zone_status == "NORMAL":
                 self.zone_status = "SCHOOL_ZONE"
-                print("SCHOOL ZONE")
+                # print("SCHOOL ZONE")
             elif self.zone_status == "SCHOOL_ZONE":
                 self.zone_status = "NORMAL"
-                print("NORMAL ZONE")
+                # print("NORMAL ZONE")
             self.duplicate_count = 30        
         
         # $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
         if self.zone_status == "SCHOOL_ZONE":
-            print("sch")
+            # print("sch")
             look_ahead_y_start = 80
             look_ahead_y_end = 120
             
@@ -87,8 +87,7 @@ class ChildZoneDetector(Node):
                 # 크롭된 영역 기준이므로 원본 BEV 좌표계로 복원하기 위해 search_x_start를 더해줍니다.
                 center_of_yellow_x = int(np.mean(pixel_x)) + search_x_start
                 
-                # 목표점은 BEV 이미지의 정중앙인 200입니다.
-                target_x = 200
+                target_x = 245
                 diff_x = center_of_yellow_x - target_x
                 
                 # 조향 감도 파라미터 (차가 너무 대기 주기가 느리거나 둔하면 1.2 ~ 1.5 정도로 키우세요)
@@ -105,13 +104,13 @@ class ChildZoneDetector(Node):
             # -----------------------------------------------------------------
             # 디버깅 시각화 (눈으로 직접 트래킹 지점을 확인해보세요)
             # -----------------------------------------------------------------
-            debug_img = cv2.cvtColor(line_mask, cv2.COLOR_GRAY2BGR)
-            # 검색 영역 표시 (초록색 상자)
-            cv2.rectangle(debug_img, (search_x_start, look_ahead_y_start), (search_x_end, look_ahead_y_end), (0, 255, 0), 2)
+            # debug_img = cv2.cvtColor(line_mask, cv2.COLOR_GRAY2BGR)
+            # # 검색 영역 표시 (초록색 상자)
+            # cv2.rectangle(debug_img, (search_x_start, look_ahead_y_start), (search_x_end, look_ahead_y_end), (0, 255, 0), 2)
             
-            if len(pixel_x) > 0:
-                # 계산된 무게중심점 표시 (빨간색 점)
-                cv2.circle(debug_img, (center_of_yellow_x, int((look_ahead_y_start + look_ahead_y_end)/2)), 5, (0, 0, 255), -1)
+            # if len(pixel_x) > 0:
+            #     # 계산된 무게중심점 표시 (빨간색 점)
+            #     cv2.circle(debug_img, (center_of_yellow_x, int((look_ahead_y_start + look_ahead_y_end)/2)), 5, (0, 0, 255), -1)
                 
             # cv2.imshow("Centroid Tracking Debug", debug_img)
             # cv2.waitKey(1)
