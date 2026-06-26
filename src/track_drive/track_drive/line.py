@@ -19,10 +19,12 @@ class LineTraceNode(Node):
         self.bridge = CvBridge()
         # self.get_logger().info(" 🛣️ Line trace node has started.")
         self.main_line = None
+        self.fast = False
         self.base_speed = 12
         self.angle_deg = 0.0
         self.cant_find_line = 0
         
+        self.alpha = 0.8
         self.standard_d = 520
         
         self.last_lane_visible_time = time.time()
@@ -144,7 +146,7 @@ class LineTraceNode(Node):
                 self.angle_deg = 100
             elif self.angle_deg < 0:
                 self.angle_deg = -100
-            self.cant_find_line = 30
+            self.cant_find_line = 45
             self.publish_motor(self.base_speed, self.angle_deg)
             return
 
@@ -152,8 +154,12 @@ class LineTraceNode(Node):
             coefficient = np.polyfit(y, x, 1)
             calculate_x = np.poly1d(coefficient)
             
-            #원본
             diff_x = calculate_x(200) - self.standard_d
+            # print(abs(calculate_x(50) - calculate_x(200)))
+            if (200 < abs(calculate_x(50) - calculate_x(200)) < 230) and (-20 < self.angle_deg < 20):
+                self.fast=True
+            else:
+                self.fast=False
             
             #우측 정렬 실험
             # diff_x = calculate_x(200) - 500
@@ -162,14 +168,19 @@ class LineTraceNode(Node):
             # if(diff_x > 20 or diff_x < -20):
             #     diff_x = 0
             
-            self.angle_deg = np.clip(diff_x, -100, 100)
+            self.angle_deg = np.clip(diff_x * self.alpha, -100, 100)
             
             if self.cant_find_line == 0:
-                self.base_speed = 12
+                if self.fast:
+                    self.base_speed = 17
+                    self.alpha = 0.6
+                else:
+                    self.base_speed = 12
+                    self.alpha = 0.9
             elif self.cant_find_line > 0:
                 self.cant_find_line -= 1
             # 자체 모터
-            self.publish_motor(self.base_speed, np.clip(diff_x, -100, 100))
+            self.publish_motor(self.base_speed, self.angle_deg)
             
             # 디버깅용
             # print("cal_x: ", calculate_x(200))

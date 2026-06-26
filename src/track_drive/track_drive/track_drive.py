@@ -29,10 +29,10 @@ class TrackDriverNode(Node):
         
         # 상수값 및 초기값 설정
         self.first = True
-        self.image = None  # 카메라 토픽 데이터를 저장할 변수
-        self.lidar_ranges = None
+        self.pass_cnt = 0
         self.lidar_no_scan_cnt = 0
         self.go_straight_start_time = None
+        self.aspect_ratio = 0.0
         
         self.latest_cv_image = None
         self.bridge = CvBridge()
@@ -55,16 +55,13 @@ class TrackDriverNode(Node):
         
         self.traffic_status = "NONE" 
         self.drive_status = "NONE"
+        self.car = False
         
-        self.odom_cnt = 0
-        self.prev_x = None
-        self.prev_y = None
-        self.total_distance = 0.0  # 총 이동 거리
-        self.is_passing_zone = False # 추월 로직 ON/OFF 플래그
-        
-        self.image_sub = self.create_subscription(Image, '/usb_cam/image_raw/front', self.image_callback, 10, callback_group=self.main_callback_group)
+        self.image_sub = self.create_subscription(Image, '/usb_cam/image_raw/front', self.image_callback, 1, callback_group=self.main_callback_group)
         self.lidar_sub = self.create_subscription(LaserScan, "/scan", self.scan_callback, qos_profile_sensor_data, callback_group=self.main_callback_group)
         self.traffic_sub = self.create_subscription(String, '/traffic_light_status', self.traffic_status_callback, 10)
+        self.traffic_big_sub = self.create_subscription(String, '/traffic_big', self.traffic_big_callback, 10)
+        self.car_sub = self.create_subscription(String, '/car_status', self.car_status, 10)
         # self.odom_sub = self.create_subscription(Odometry, '/odom', self.odom_callback, 10) # QoS 프로파일 (일반적으로 10 사용)
         self.motor_pub = self.create_publisher(XycarMotor, '/xycar_motor', 10)
         
@@ -78,6 +75,18 @@ class TrackDriverNode(Node):
         self.traffic_status = msg.data
         if self.traffic_status == "GO":
             self.first = False
+    
+    def traffic_big_callback(self, msg):
+        if msg.data == "big":
+            # print("big")
+            self.line_module.fast = True
+            
+    def car_status(self, msg):
+        if msg.data == "car":
+            self.car = True
+        else:
+            self.car = False
+            
         
     def image_callback(self, msg):
         if self.drive_status == "RABACON":
@@ -120,7 +129,7 @@ class TrackDriverNode(Node):
             # print(f"speed : {self.base_speed}")
             self.base_angle = self.line_module.angle_deg
         else:
-            pass
+            self.line_module.standard_d = 520
             # self.base_speed = 5
             # print('child zone')
             # print('this is school zone angle: ', self.base_angle)
@@ -263,36 +272,39 @@ class TrackDriverNode(Node):
         min_s_right = min(s_right) if s_right else float('inf')
         
         # 2. 상태 머신 (양방향 FSM)
-        if self.drive_status == 'NORMAL':
-            if min_f_center < 5 and len(f_center) > 10:  # 정면에 차량 감지
+        if self.car and self.drive_status == 'NORMAL' and self.child_zone_module.zone_status != 'SCHOOL_ZONE':
+            if min_f_center < 7 and len(f_center) > 10:  # 정면에 차량 감지
                 # 뚫린 차선 판단 (좌/우측 앞 공간 비교)
                 if min_f_left > min_f_right:
                     self.pass_direction = 'LEFT'
-                    # self.get_logger().warn(f"정면 막힘! 좌측 공간 확인됨({min_f_left:.1f}m). 좌측 회피 시작!")
+                    self.get_logger().warn(f"정면 막힘! 좌측 공간 확인됨({min_f_left:.1f}m). 좌측 회피 시작!")
                 else:
                     self.pass_direction = 'RIGHT'
-                    # self.get_logger().warn(f"정면 막힘! 우측 공간 확인됨({min_f_right:.1f}m). 우측 회피 시작!")
+                    self.get_logger().warn(f"정면 막힘! 우측 공간 확인됨({min_f_right:.1f}m). 우측 회피 시작!")
                 
                 self.drive_status = 'AVOID'
 
         elif self.drive_status == 'AVOID':
             if self.pass_direction == 'LEFT':
-                # self.get_logger().info("좌측으로 차선 변경 중...")
+                self.get_logger().info("좌측으로 차선 변경 중...")
                 self.line_module.standard_d = 600
             else:
-                # self.get_logger().info("우측으로 차선 변경 중...")
+                self.get_logger().info("우측으로 차선 변경 중...")
                 self.line_module.standard_d = 440
+                self.line_module.publish_motor(5, self.line_module.angle_deg)
+                
+            self.pass_cnt += 1
 
             # 차선을 완전히 넘어와서 정면이 뚫렸다면 직진(추월) 상태로 전환
-            if min_f_center > 10:
-                # self.get_logger().warn("차선 진입 완료, 직진하며 추월합니다.")
+            if min_f_center > 5 and self.pass_cnt > 30:
+                self.pass_cnt = 0
+                self.get_logger().warn("차선 진입 완료, 직진하며 추월합니다.")
                 self.drive_status = 'PASSING'
                 
 
         elif self.drive_status == 'PASSING':
-            # self.get_logger().info("추월 차선에서 직진 중...")
-            # [TODO] 스티어링 중립 (직진 0.0)
-            self.base_speed = 15
+            self.get_logger().info("추월 차선에서 직진 중...")
+            self.line_module.publish_motor(15, self.line_module.angle_deg)
             # 내가 좌측으로 피했다면, 상대차는 내 '우측'에 있음
             if self.pass_direction == 'LEFT' and min_s_right > 5.0:
                 # self.get_logger().warn("우측 상대 차량 통과 완료! 차선 복귀 시작")
@@ -305,19 +317,43 @@ class TrackDriverNode(Node):
         elif self.drive_status == 'RETURN':
             # 피했던 방향의 반대 방향으로 조향하여 복귀
             if self.pass_direction == 'LEFT':
-                # self.get_logger().info("우측으로 조향하여 본래 차선 복귀 중...")
+                self.get_logger().info("우측으로 조향하여 본래 차선 복귀 중...")
                 # [TODO] 우측으로 스티어링 꺾기 (예: -0.3)
-                self.line_module.standard_d = 500
-            else:
-                # self.get_logger().info("좌측으로 조향하여 본래 차선 복귀 중...")
+                if self.pass_cnt < 10:
+                    self.line_module.standard_d = 520
+                    self.line_module.alpha = 0.6
+                elif self.pass_cnt < 20:
+                    self.line_module.standard_d = 490
+                    self.line_module.alpha = 0.6
+                elif self.pass_cnt < 30:
+                    self.line_module.standard_d = 450
+                    self.line_module.alpha = 0.6
+                
+            elif self.pass_direction == 'RIGHT' :
+                self.get_logger().info("좌측으로 조향하여 본래 차선 복귀 중...")
                 # [TODO] 좌측으로 스티어링 꺾기 (예: +0.3)
-                self.line_module.standard_d = 540
+                if self.pass_cnt < 10:
+                    self.line_module.standard_d = 520
+                    self.line_module.alpha = 0.6
+                elif self.pass_cnt < 20:
+                    self.line_module.standard_d = 550
+                    self.line_module.alpha = 0.6
+                elif self.pass_cnt < 30:
+                    self.line_module.standard_d = 590
+                    self.line_module.alpha = 0.6
+            self.line_module.publish_motor(18, self.line_module.angle_deg)
+            self.pass_cnt += 1
             
             # 복귀 완료 조건 (정면이 충분히 뚫렸고, 다시 중앙에 자리 잡았다고 가정)
-            if min_f_center > 5.0: 
-                #  self.get_logger().warn("차선 복귀 완료! 일반 주행 전환")
-                 self.drive_status = 'NORMAL'
-                 self.pass_direction = None # 방향 초기화
+            if min_f_center > 5.0 and min_s_left > 2.0 and min_s_right > 2.0: 
+                if self.pass_cnt > 30:
+                    self.pass_cnt = 0
+                    self.get_logger().warn("차선 복귀 완료! 일반 주행 전환")
+                    self.drive_status = 'NORMAL'
+                    self.pass_direction = None # 방향 초기화
+                    self.line_module.alpha = 0.8
+                    self.line_module.publish_motor(18, self.line_module.angle_deg)
+                
     
     # def odom_callback(self, msg):
     #     curr_x = msg.pose.pose.position.x
@@ -374,12 +410,14 @@ def run_driver():
 # 메인 함수
 #=============================================
 def main(args=None):
-      
+    multiprocessing.set_start_method('spawn')
     # 1. 신호등 프로세스 생성 (서브 코어 할당)
     traffic_process = multiprocessing.Process(target=run_traffic_light)
     # 2. 주행 제어 프로세스 생성 (메인 코어 할당)
     driver_process = multiprocessing.Process(target=run_driver)
     # 3. 두 개의 OS 프로세스를 동시에 백그라운드에서 스타트!
+    traffic_process.daemon = True
+    driver_process.daemon = True
     traffic_process.start()
     driver_process.start()
     try:
